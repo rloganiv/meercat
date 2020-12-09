@@ -141,3 +141,28 @@ class ELDataset(torch.utils.data.Dataset):
         with open(fname, 'wb') as f:
             pickle.dump(state_dict, f)
 
+
+class ELIterableDataset(torch.utils.data.IterableDataset):
+    def __init__(self, fname, tokenizer, entity_tokenizer, rank, world_size):
+        super().__init__()
+        self._fname = fname
+        self._tokenizer = tokenizer
+        self._entity_tokenizer = entity_tokenizer
+        self._rank = rank
+        self._world_size = world_size
+
+    def __iter__(self):
+        def generator():
+            worker_info = torch.utils.data.get_worker_info()
+            with open(self._fname, 'r') as f:
+                for i, line in enumerate(f):
+                    # Ensures data isn't repeated across processes
+                    if self._world_size is not None:
+                        if (i % self._world_size) != self._rank:
+                            continue
+                    data = json.loads(line)
+                    model_inputs = _encode_mention(data, self._tokenizer)
+                    model_inputs['labels'] = self._entity_tokenizer(data['entity_id'])
+                    yield model_inputs
+        return generator()
+

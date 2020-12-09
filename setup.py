@@ -24,7 +24,7 @@ setuptools.setup(
     url='https://github.com/rloganiv/meercat',
     packages=setuptools.find_packages(),
     install_requires=[
-        'transformers',
+        'transformers>=4.0.0',
     ],
     extras_require={
         'test': ['pytest']

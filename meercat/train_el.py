@@ -32,8 +32,14 @@ def main(args):
     # Handle multi-GPU setup
     world_size = None
     if args.local_rank == -1:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if args.model_parallel:
+            embedding_device = torch.device('cuda:0')
+            device = torch.device('cuda:1')
+        else:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     else:
+        if args.model_parallel:
+            raise RuntimeError('Cannot use model parallel w/ data parallel')
         device = torch.device('cuda', args.local_rank)
         torch.distributed.init_process_group(
             backend='nccl',
@@ -54,7 +60,11 @@ def main(args):
     entity_tokenizer = utils.EntityTokenizer.from_pretrained(entity_vocab)
     counts = torch.tensor(entity_tokenizer.counts, device=device, dtype=torch.float32)
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        args.model_name,
+        model_max_length=args.max_length,
+        use_fast=True,
+    )
     logger.info('Adding separators to tokenizer')
     utils.add_mention_seps(tokenizer)
 
@@ -70,6 +80,8 @@ def main(args):
     )
     model.resize_token_embeddings(len(tokenizer))  # Opt. resize for entity separators
     model.to(device)
+    if args.model_parallel:
+        model.entity_embeddings.to(embedding_device)
     if args.local_rank != -1:
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -78,35 +90,56 @@ def main(args):
         )
 
     logger.info('Loading train')
-    train_data = utils.ELDataset.load(args.train)
+    # train_data = utils.ELDataset.load(args.train)
+    train_data = utils.ELIterableDataset(
+        fname=args.train,
+        tokenizer=tokenizer,
+        entity_tokenizer=entity_tokenizer,
+        rank=args.local_rank,
+        world_size=world_size,
+    )
     logger.info('Loading dev')
-    dev_data = utils.ELDataset.load(args.dev)
+    # dev_data = utils.ELDataset.load(args.dev)
+    dev_data = utils.ELIterableDataset(
+        fname=args.dev,
+        tokenizer=tokenizer,
+        entity_tokenizer=entity_tokenizer,
+        rank=args.local_rank,
+        world_size=world_size,
+    )
     logger.info('Loading test')
-    test_data = utils.ELDataset.load(args.test)
+    # test_data = utils.ELDataset.load(args.test)
+    test_data = utils.ELIterableDataset(
+        fname=args.test,
+        tokenizer=tokenizer,
+        entity_tokenizer=entity_tokenizer,
+        rank=args.local_rank,
+        world_size=world_size,
+    )
 
-    if args.local_rank != -1:
-        train_sampler = torch.utils.data.DistributedSampler(train_data)
-        dev_sampler = torch.utils.data.DistributedSampler(dev_data)
-        test_sampler = torch.utils.data.DistributedSampler(test_data)
-    else:
-        train_sampler = torch.utils.data.RandomSampler(train_data)
-        dev_sampler = torch.utils.data.SequentialSampler(dev_data)
-        test_sampler = torch.utils.data.SequentialSampler(test_data)
+    # if args.local_rank != -1:
+        # train_sampler = torch.utils.data.DistributedSampler(train_data)
+        # dev_sampler = torch.utils.data.DistributedSampler(dev_data)
+        # test_sampler = torch.utils.data.DistributedSampler(test_data)
+    # else:
+        # train_sampler = torch.utils.data.RandomSampler(train_data)
+        # dev_sampler = torch.utils.data.SequentialSampler(dev_data)
+        # test_sampler = torch.utils.data.SequentialSampler(test_data)
 
     train_loader = torch.utils.data.DataLoader(
         train_data,
         batch_size=args.batch_size,
-        sampler=train_sampler,
+        # sampler=train_sampler,
     )
     dev_loader = torch.utils.data.DataLoader(
         dev_data,
         batch_size=args.batch_size,
-        sampler=dev_sampler,
+        # sampler=dev_sampler,
     )
     test_loader = torch.utils.data.DataLoader(
         test_data,
         batch_size=args.batch_size,
-        sampler=test_sampler,
+        # sampler=test_sampler,
     )
     optimizer = transformers.AdamW(model.parameters(), lr=args.lr)
     scaler = torch.cuda.amp.GradScaler(enabled=args.fp16)
@@ -120,8 +153,8 @@ def main(args):
     n_iter = 0
     for epoch in range(args.epochs):
         logger.info('Epoch: %s', epoch)
-        if args.local_rank != -1:
-            train_sampler.set_epoch(epoch)
+        # if args.local_rank != -1:
+            # train_sampler.set_epoch(epoch)
 
         # Train loop
         model.train()
@@ -218,6 +251,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed',  type=int, default=1234)
     parser.add_argument('--fp16', action='store_true')
     parser.add_argument('--accumulation_steps', type=int, default=1)
+    parser.add_argument('--max_length', type=int, default=128)
 
     # Model
     parser.add_argument('--model_name', type=str, required=True)
@@ -227,6 +261,7 @@ if __name__ == '__main__':
 
     # Distributed
     parser.add_argument('--local_rank', type=int, default=-1)
+    parser.add_argument('--model_parallel', action='store_true')
 
     args = parser.parse_args()
 
